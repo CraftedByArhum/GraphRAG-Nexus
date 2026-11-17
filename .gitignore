@@ -1,0 +1,13 @@
+# Environment variables
+.env
+
+# Python virtual environment
+venv/
+
+# Local databases and graph files
+chroma_db/
+knowledge_graph.graphml
+
+# Python cache
+__pycache__/
+*.pyc

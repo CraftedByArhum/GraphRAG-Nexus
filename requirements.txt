@@ -1,0 +1,11 @@
+streamlit
+google-generativeai
+networkx
+chromadb
+pydantic
+pandas
+numpy
+PyPDF2
+streamlit-agraph
+python-dotenv
+sentence-transformers
