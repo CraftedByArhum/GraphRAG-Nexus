@@ -8,7 +8,7 @@ import google.generativeai as genai
 from PyPDF2 import PdfReader
 from chromadb.utils import embedding_functions
 
-# Load environment variables (Local .env or Streamlit Secrets)
+# Load environment variables
 load_dotenv()
 try:
     api_key = st.secrets["GEMINI_API_KEY"]
@@ -22,23 +22,47 @@ genai.configure(api_key=api_key)
 
 class GraphRAGEngine:
     def __init__(self):
-        # Using Gemini 3.1 Flash Lite for efficient, high-limit text generation
-        self.model = genai.GenerativeModel("gemini-3.1-flash-lite")
+        # Pool of free-tier models to distribute load and bypass limits
+        self.model_pool = [
+            "gemini-3.1-flash-lite",
+            "gemini-3.5-flash-lite",
+            "gemini-3.6-flash",
+            "gemini-3.8-flash"
+        ]
+        self.model_index = 0  # Round-robin tracking pointer
         
         # Initialize Local Embedding Function for ChromaDB
         self.ef = embedding_functions.SentenceTransformerEmbeddingFunction(
             model_name="all-MiniLM-L6-v2"
         )
         
-        # Ephemeral In-Memory Client ensures complete isolation per session
+        # Ephemeral In-Memory Client for multi-user session isolation
         self.chroma_client = chromadb.Client()
         self.collection = self.chroma_client.get_or_create_collection(
             name="graphrag_session_chunks",
             embedding_function=self.ef
         )
         
-        # Isolated NetworkX Knowledge Graph for this session
         self.graph = nx.Graph()
+
+    def generate_with_fallback(self, prompt: str) -> str:
+        """Cycles through the model pool. If a 429 rate limit is hit, automatically fails over to the next model."""
+        attempts = 0
+        while attempts < len(self.model_pool):
+            model_name = self.model_pool[self.model_index]
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(prompt)
+                return response.text
+            except Exception as e:
+                err_msg = str(e)
+                if "429" in err_msg or "ResourceExhausted" in err_msg or "rate limit" in err_msg.lower():
+                    print(f"Rate limit hit on {model_name}. Rotating pool...")
+                    self.model_index = (self.model_index + 1) % len(self.model_pool)
+                    attempts += 1
+                else:
+                    raise e
+        raise RuntimeError("All models in the Gemini pool have exhausted their rate limits. Please wait a moment.")
 
     def extract_text_from_pdf(self, uploaded_file) -> str:
         reader = PdfReader(uploaded_file)
@@ -74,7 +98,6 @@ class GraphRAGEngine:
 
         chunks = self.chunk_text(raw_text)
         
-        # Upsert chunks into session-isolated ChromaDB collection
         for idx, chunk in enumerate(chunks):
             doc_id = f"{filename}_chunk_{idx}"
             self.collection.upsert(
@@ -83,7 +106,6 @@ class GraphRAGEngine:
                 metadatas=[{"source": filename, "chunk_index": idx}]
             )
 
-        # Extract Entities and Relationships using Gemini for Knowledge Graph
         sample_text = raw_text[:4000] 
         prompt = f"""
         Extract key entities (nodes) and their relationships (edges) from the following text. 
@@ -101,8 +123,8 @@ class GraphRAGEngine:
         """
         
         try:
-            response = self.model.generate_content(prompt)
-            clean_text = response.text.strip()
+            raw_response = self.generate_with_fallback(prompt)
+            clean_text = raw_response.strip()
             if clean_text.startswith("```json"):
                 clean_text = clean_text[7:]
             if clean_text.endswith("```"):
@@ -151,7 +173,7 @@ class GraphRAGEngine:
             context_str += "\n\n" + "\n".join([f"[Graph Relation]: {e}" for e in graph_edges])
             
         prompt = f"""
-        You are GraphRAG Nexus, an advanced multi-agent research assistant. Answer the user's query thoroughly using ONLY the provided Vector Chunks and Graph Relations. If the information is insufficient, state so clearly.
+        You are GraphRAG Nexus, an advanced research assistant. Answer the user's query thoroughly using ONLY the provided Vector Chunks and Graph Relations. If the information is insufficient, state so clearly.
         
         Context:
         {context_str}
@@ -161,9 +183,9 @@ class GraphRAGEngine:
         Provide a structured, deeply analytical answer with citations where appropriate.
         """
         
-        response = self.model.generate_content(prompt)
+        answer_text = self.generate_with_fallback(prompt)
         return {
-            "answer": response.text,
+            "answer": answer_text,
             "chunks": chunks,
             "graph_context": graph_edges
         }
