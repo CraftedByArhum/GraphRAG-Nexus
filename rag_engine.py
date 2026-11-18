@@ -2,51 +2,43 @@ import os
 import json
 import chromadb
 import networkx as nx
+import streamlit as st
 from dotenv import load_dotenv
 import google.generativeai as genai
 from PyPDF2 import PdfReader
 from chromadb.utils import embedding_functions
 
-# Load environment variables
+# Load environment variables (Local .env or Streamlit Secrets)
 load_dotenv()
-api_key = os.getenv("GEMINI_API_KEY")
+try:
+    api_key = st.secrets["GEMINI_API_KEY"]
+except Exception:
+    api_key = os.getenv("GEMINI_API_KEY")
 
 if not api_key:
-    raise ValueError("GEMINI_API_KEY not found in environment variables or .env file!")
+    raise ValueError("GEMINI_API_KEY not found in Streamlit Secrets or environment variables!")
 
 genai.configure(api_key=api_key)
 
-# Global persistent storage paths
-CHROMA_PATH = "./chroma_db"
-GRAPH_PATH = "./knowledge_graph.graphml"
-
 class GraphRAGEngine:
     def __init__(self):
-        # Initialize Gemini Model for generation
-        self.model = genai.GenerativeModel("gemini-2.5-flash")
+        # Using Gemini 3.1 Flash Lite for efficient, high-limit text generation
+        self.model = genai.GenerativeModel("gemini-3.1-flash-lite")
         
-        # Initialize Local Embedding Function for ChromaDB (Runs 100% locally and reliably)
+        # Initialize Local Embedding Function for ChromaDB
         self.ef = embedding_functions.SentenceTransformerEmbeddingFunction(
             model_name="all-MiniLM-L6-v2"
         )
         
-        # Initialize ChromaDB Vector Store with local embedding function
-        self.chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
+        # Ephemeral In-Memory Client ensures complete isolation per session
+        self.chroma_client = chromadb.Client()
         self.collection = self.chroma_client.get_or_create_collection(
-            name="graphrag_chunks",
+            name="graphrag_session_chunks",
             embedding_function=self.ef
         )
         
-        # Initialize NetworkX Knowledge Graph
+        # Isolated NetworkX Knowledge Graph for this session
         self.graph = nx.Graph()
-        if os.path.exists(GRAPH_PATH):
-            try:
-                self.graph = nx.read_graphml(GRAPH_PATH)
-            except Exception:
-                self.graph = nx.Graph()
-
-    def save_graph(self):
-        nx.write_graphml(self.graph, GRAPH_PATH)
 
     def extract_text_from_pdf(self, uploaded_file) -> str:
         reader = PdfReader(uploaded_file)
@@ -67,13 +59,22 @@ class GraphRAGEngine:
         return chunks
 
     def process_document(self, uploaded_file, filename: str):
+        # Clear previous session data if a new file is uploaded
+        try:
+            existing_ids = self.collection.get()["ids"]
+            if existing_ids:
+                self.collection.delete(ids=existing_ids)
+        except Exception:
+            pass
+        self.graph.clear()
+
         raw_text = self.extract_text_from_pdf(uploaded_file)
         if not raw_text.strip():
             raise ValueError("Could not extract any text from the uploaded document.")
 
         chunks = self.chunk_text(raw_text)
         
-        # 1. Upsert chunks to ChromaDB (Chroma handles local embedding generation automatically)
+        # Upsert chunks into session-isolated ChromaDB collection
         for idx, chunk in enumerate(chunks):
             doc_id = f"{filename}_chunk_{idx}"
             self.collection.upsert(
@@ -82,7 +83,7 @@ class GraphRAGEngine:
                 metadatas=[{"source": filename, "chunk_index": idx}]
             )
 
-        # 2. Extract Entities and Relationships using Gemini for Knowledge Graph
+        # Extract Entities and Relationships using Gemini for Knowledge Graph
         sample_text = raw_text[:4000] 
         prompt = f"""
         Extract key entities (nodes) and their relationships (edges) from the following text. 
@@ -118,22 +119,18 @@ class GraphRAGEngine:
                 r = rel.get("relation", "relates_to")
                 if s and t:
                     self.graph.add_edge(s, t, relation=r)
-                    
-            self.save_graph()
         except Exception as e:
             print(f"Graph extraction warning: {e}")
 
         return len(chunks), self.graph.number_of_nodes(), self.graph.number_of_edges()
 
     def dual_index_retrieve(self, query: str, top_k: int = 3):
-        # 1. Vector Search using local embedding function
         results = self.collection.query(
             query_texts=[query],
             n_results=top_k
         )
         retrieved_chunks = results.get("documents", [[]])[0]
         
-        # 2. Graph Traversal Context
         graph_context = []
         query_words = set(query.lower().split())
         for node in self.graph.nodes():

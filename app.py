@@ -8,11 +8,11 @@ st.set_page_config(
     layout="wide"
 )
 
-@st.cache_resource
-def get_engine():
-    return GraphRAGEngine()
+# Bind the GraphRAGEngine strictly to the user's private session state
+if "engine" not in st.session_state:
+    st.session_state.engine = GraphRAGEngine()
 
-engine = get_engine()
+engine = st.session_state.engine
 
 st.title("🧬 GraphRAG Nexus")
 st.markdown("**Hybrid Vector-Graph Multi-Agent Knowledge Synthesis Engine** — Moving beyond flat RAG with structural entity mapping and multi-hop reasoning.")
@@ -26,12 +26,12 @@ if uploaded_file is not None:
         with st.spinner("Extracting text, chunking vectors, and synthesizing Knowledge Graph..."):
             try:
                 num_chunks, num_nodes, num_edges = engine.process_document(uploaded_file, uploaded_file.name)
-                st.sidebar.success(f"Successfully processed! Stored {num_chunks} vector chunks. Knowledge graph now has {num_nodes} nodes and {num_edges} edges.")
+                st.sidebar.success(f"Successfully processed! Stored {num_chunks} vector chunks. Knowledge graph has {num_nodes} nodes and {num_edges} edges.")
             except Exception as e:
                 st.sidebar.error(f"Error processing file: {e}")
 
 st.sidebar.markdown("---")
-st.sidebar.info("GraphRAG Nexus combines ChromaDB semantic vector search with NetworkX graph traversal to solve multi-hop reasoning failures in traditional AI pipelines.")
+st.sidebar.info("Each student session runs in an isolated, secure memory sandbox. Uploading a new file automatically replaces your current session index.")
 
 # Main Layout Tabs
 tab1, tab2 = st.tabs(["💬 Knowledge Query & Synthesis", "🕸️ Interactive Knowledge Graph"])
@@ -69,7 +69,6 @@ with tab2:
         nodes = []
         edges = []
         
-        # Limit nodes displayed for smooth UI rendering if graph is large
         displayed_nodes = list(engine.graph.nodes())[:50]
         
         for node in displayed_nodes:
